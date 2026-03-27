@@ -2,9 +2,10 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Arduino.h>
+#include <ArduinoIoTCloud.h>
 #include <ArduinoJson.h>
+#include <Arduino_ConnectionHandler.h>
 #include <HTTPClient.h>
-#include <WiFi.h>
 #include <Wire.h>
 
 #include "config.hpp"
@@ -40,8 +41,37 @@ const int LED_PIN = 4;
 unsigned long imageCount = 0;
 String slotLabels[3] = {"E1", "E2", "E3"};
 String slotStatus[3] = {"?", "?", "?"};
+bool wifiConnected = false;
 
-void initWifi() {
+String cloudSlot1, cloudSlot2, cloudSlot3;
+
+WiFiConnectionHandler ArduinoIoTPreferredConnection(WIFI_SSID, WIFI_PASSWORD);
+
+void showConnecting() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 20);
+  display.println("Conectando WiFi...");
+  display.setCursor(0, 35);
+  display.println(WIFI_SSID);
+  display.display();
+}
+
+void onNetworkConnect() {
+  wifiConnected = true;
+  Serial.println("WiFi connected");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+void onNetworkDisconnect() {
+  wifiConnected = false;
+  showConnecting();
+  Serial.println("WiFi disconnected");
+}
+
+void initArduinoCloud() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
@@ -51,37 +81,19 @@ void initWifi() {
   display.println(WIFI_SSID);
   display.display();
 
-  Serial.print("Connecting to ");
-  Serial.println(WIFI_SSID);
+  ArduinoCloud.setBoardId(DEVICE_ID);
+  ArduinoCloud.setSecretDeviceKey(DEVICE_KEY);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  ArduinoCloud.addProperty(cloudSlot1, Permission::Read);
+  ArduinoCloud.addProperty(cloudSlot2, Permission::Read);
+  ArduinoCloud.addProperty(cloudSlot3, Permission::Read);
 
-  int dots = 0;
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+  ArduinoCloud.begin(ArduinoIoTPreferredConnection);
 
-    display.fillRect(0, 50, SCREEN_WIDTH, 14, SSD1306_BLACK);
-    display.setCursor(0, 50);
-    for (int i = 0; i < (dots % 4); i++) {
-      display.print(".");
-    }
-    display.display();
-    dots++;
-  }
-
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setCursor(0, 20);
-  display.println("WiFi Conectado!");
-  display.setCursor(0, 35);
-  display.println(WiFi.localIP());
-  display.display();
-  delay(2000);
-
-  Serial.println("WiFi connected");
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
+  ArduinoIoTPreferredConnection.addCallback(NetworkConnectionEvent::CONNECTED,
+                                            onNetworkConnect);
+  ArduinoIoTPreferredConnection.addCallback(
+      NetworkConnectionEvent::DISCONNECTED, onNetworkDisconnect);
 }
 
 bool initCamera() {
@@ -111,7 +123,7 @@ bool initCamera() {
       .pixel_format = PIXFORMAT_JPEG,
       .frame_size = FRAMESIZE_QVGA,
 
-      .jpeg_quality = 12,
+      .jpeg_quality = 20,
       .fb_count = 1,
       .fb_location = CAMERA_FB_IN_PSRAM,
       .grab_mode = CAMERA_GRAB_LATEST,
@@ -132,7 +144,8 @@ void updateOLED() {
 
   display.setCursor(20, 35);
   for (int i = 0; i < 3; i++) {
-    if (i > 0) display.print(" ");
+    if (i > 0)
+      display.print(" ");
     if (slotStatus[i] == "free") {
       display.print("L");
     } else if (slotStatus[i] == "occupied") {
@@ -177,10 +190,17 @@ void sendImage() {
       if (!error) {
         JsonArray spaces = doc["spaces"].as<JsonArray>();
         Serial.printf("Parsed %d spaces\n", spaces.size());
-        for (int i = 0; i < (int)spaces.size() && i < 3; i++) {
-          slotLabels[i] = spaces[i]["label"].as<String>();
-          slotStatus[i] = spaces[i]["status"].as<String>();
-          Serial.printf("  %s: %s\n", slotLabels[i].c_str(), slotStatus[i].c_str());
+        for (JsonObject space : spaces) {
+          String label = space["label"].as<String>();
+          String status = space["status"].as<String>();
+          Serial.printf("  %s: %s\n", label.c_str(), status.c_str());
+
+          for (int i = 0; i < 3; i++) {
+            if (slotLabels[i] == label) {
+              slotStatus[i] = status;
+              break;
+            }
+          }
         }
       } else {
         Serial.printf("JSON parse error: %s\n", error.c_str());
@@ -223,22 +243,25 @@ void setup() {
     return;
   }
 
-  initWifi();
+  initArduinoCloud();
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-
-  updateOLED();
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected, reconnecting...");
-    WiFi.reconnect();
-    delay(5000);
+  ArduinoCloud.update();
+
+  if (!wifiConnected) {
+    delay(500);
     return;
   }
 
   sendImage();
+
+  cloudSlot1 = slotStatus[0];
+  cloudSlot2 = slotStatus[1];
+  cloudSlot3 = slotStatus[2];
+
   updateOLED();
 }
