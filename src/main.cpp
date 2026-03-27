@@ -38,8 +38,8 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 const int LED_PIN = 4;
 
 unsigned long imageCount = 0;
+String slotLabels[3] = {"E1", "E2", "E3"};
 String slotStatus[3] = {"?", "?", "?"};
-bool flashEnabled = false;
 
 void initWifi() {
   display.clearDisplay();
@@ -122,23 +122,33 @@ bool initCamera() {
 
 void updateOLED() {
   display.clearDisplay();
-  display.setTextSize(2);
+  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(2);
 
   display.setCursor(20, 10);
   display.print("1 2 3");
 
   display.setCursor(20, 35);
-  display.print(slotStatus[0] + " " + slotStatus[1] + " " + slotStatus[2]);
+  for (int i = 0; i < 3; i++) {
+    if (i > 0) display.print(" ");
+    if (slotStatus[i] == "free") {
+      display.print("L");
+    } else if (slotStatus[i] == "occupied") {
+      display.print("O");
+    } else if (slotStatus[i] == "reserved") {
+      display.print("R");
+    } else {
+      display.print("?");
+    }
+  }
 
   display.display();
 }
 
 void sendImage() {
-  Serial.println("Free heap before capture: " + String(ESP.getFreeHeap()));
-
   camera_fb_t *fb = esp_camera_fb_get();
-
   if (!fb) {
     Serial.println("Camera capture failed");
     return;
@@ -153,56 +163,38 @@ void sendImage() {
     http.addHeader("Content-Type", "image/jpeg");
     http.addHeader("Content-Length", String(fb->len));
 
-    Serial.println("Sending image to backend...");
-
     int httpCode = http.POST(fb->buf, fb->len);
     esp_camera_fb_return(fb);
 
-    if (httpCode > 0) {
+    if (httpCode == 200) {
       imageCount++;
-      Serial.printf("Response code: %d\n", httpCode);
-
       String response = http.getString();
       Serial.println("Response: " + response);
 
-      if (httpCode == 200) {
-        JsonDocument responseDoc;
-        DeserializationError error = deserializeJson(responseDoc, response);
+      JsonDocument doc;
+      DeserializationError error = deserializeJson(doc, response);
 
-        if (!error) {
-          JsonArray slots = responseDoc["slots"].as<JsonArray>();
-
-          if (slots.size() >= 3) {
-            slotStatus[0] = slots[0].as<String>();
-            slotStatus[1] = slots[1].as<String>();
-            slotStatus[2] = slots[2].as<String>();
-
-            updateOLED();
-          }
-
-          // Controlar flash según estado del backend
-          if (responseDoc.containsKey("flash")) {
-            bool flashState = responseDoc["flash"].as<bool>();
-            digitalWrite(LED_PIN, flashState ? HIGH : LOW);
-            flashEnabled = flashState;
-            Serial.printf("Flash: %s\n", flashState ? "ON" : "OFF");
-          }
-        } else {
-          Serial.println("JSON parse error");
-          updateOLED();
+      if (!error) {
+        JsonArray spaces = doc["spaces"].as<JsonArray>();
+        Serial.printf("Parsed %d spaces\n", spaces.size());
+        for (int i = 0; i < (int)spaces.size() && i < 3; i++) {
+          slotLabels[i] = spaces[i]["label"].as<String>();
+          slotStatus[i] = spaces[i]["status"].as<String>();
+          Serial.printf("  %s: %s\n", slotLabels[i].c_str(), slotStatus[i].c_str());
         }
       } else {
-        updateOLED();
+        Serial.printf("JSON parse error: %s\n", error.c_str());
       }
+    } else if (httpCode > 0) {
+      Serial.printf("Predict response: %d\n", httpCode);
     } else {
       Serial.printf("HTTP POST failed: %s\n",
                     http.errorToString(httpCode).c_str());
-      updateOLED();
     }
     http.end();
   } else {
+    esp_camera_fb_return(fb);
     Serial.println("Failed to connect to backend");
-    updateOLED();
   }
 }
 
@@ -232,10 +224,11 @@ void setup() {
   }
 
   initWifi();
-  updateOLED();
 
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
+
+  updateOLED();
 }
 
 void loop() {
@@ -247,4 +240,5 @@ void loop() {
   }
 
   sendImage();
+  updateOLED();
 }
